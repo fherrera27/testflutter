@@ -1,139 +1,57 @@
-Aquí va el ejemplo completo (punto de control) con todos los casos de uso que definimos, ya con el flujo final “senior”:
-	•	phase como fuente de verdad (idle/loading/loaded/failed)
-	•	batching de cambios (1 build por evento)
-	•	Presenter + SectionFactories (Factory Pattern)
-	•	cards con imagen + selección que cambia contenido
-	•	flags flowType y hasCupo controlan secciones
-	•	CTA elige use case según flowType
-	•	CTA falla → modal
-	•	aceptar modal → actualiza cupo (vía use case UpdateCupoUseCase, no hardcode local)
-	•	analítica como side-effect (inyección por protocolo)
+Perfecto. Te implemento lo necesario (mínimo pero completo) para el flujo ViewModel Observable + View SwiftUI, siguiendo exactamente lo conversado y alineado a la UI de tu imagen (con nombres ficticios).
 
-Pega esto tal cual en un proyecto SwiftUI (iOS 16+).
-Todo usa SF Symbols para imágenes (no necesitas assets).
+Incluye:
+	•	Phase (idle/loading/loaded/failed) como fuente de verdad
+	•	DomainState + Event + Route + Modal
+	•	Presenter + Factories (Factory Pattern) para construir ViewData
+	•	ViewModel orquestador con batching (1 build por evento)
+	•	View “tonta”: pinta ViewData, envía eventos, muestra modal
+	•	Cards con imagen (SF Symbols) + selección que cambia la info
+
+Esto es 100% Presentation (más un repo mock mínimo para que corra). Si quieres luego conectamos Data/Domain real.
 
 ⸻
 
-1) Domain.swift
+1) Presentation/State
+
+CardUpgradePhase.swift
 
 import Foundation
 
-// MARK: - Domain Models
-
-enum FlowType: Equatable {
-  case digital
-  case fisico
+enum CardUpgradePhase: Equatable {
+  case idle
+  case loading
+  case loaded
+  case failed
 }
 
-enum Destination: Equatable {
-  case digitalNext(stepId: String)
-  case physicalBranchPicker
-}
-
-struct BackendCard: Equatable, Identifiable {
-  let id: String
-  let title: String
-  let subtitle: String
-  let imageKey: String  // SF Symbol name en este demo
-}
-
-struct ScreenPayload: Equatable {
-  let flowType: FlowType
-  let hasCupo: Bool
-
-  let userName: String
-  let availableAmount: Decimal
-  let backendMessage: String?
-
-  let cards: [BackendCard]
-}
-
-// MARK: - Repository
-
-protocol ScreenRepository {
-  func fetchScreen() async throws -> ScreenPayload
-
-  func startDigitalFlow(payload: ScreenPayload, selectedCardId: String) async throws -> Destination
-  func startPhysicalFlow(payload: ScreenPayload, selectedCardId: String) async throws -> Destination
-
-  /// Caso de uso extra: al aceptar modal (CTA falló) se actualiza cupo en backend
-  func updateCupoAfterFailure(payload: ScreenPayload) async throws -> ScreenPayload
-}
-
-// MARK: - UseCases
-
-struct LoadScreenUseCase {
-  let repo: ScreenRepository
-  func execute() async throws -> ScreenPayload { try await repo.fetchScreen() }
-}
-
-struct StartDigitalFlowUseCase {
-  let repo: ScreenRepository
-  func execute(payload: ScreenPayload, selectedCardId: String) async throws -> Destination {
-    try await repo.startDigitalFlow(payload: payload, selectedCardId: selectedCardId)
-  }
-}
-
-struct StartPhysicalFlowUseCase {
-  let repo: ScreenRepository
-  func execute(payload: ScreenPayload, selectedCardId: String) async throws -> Destination {
-    try await repo.startPhysicalFlow(payload: payload, selectedCardId: selectedCardId)
-  }
-}
-
-struct UpdateCupoUseCase {
-  let repo: ScreenRepository
-  func execute(payload: ScreenPayload) async throws -> ScreenPayload {
-    try await repo.updateCupoAfterFailure(payload: payload)
-  }
-}
-
-
-⸻
-
-2) Analytics.swift
+CardUpgradeEvent.swift
 
 import Foundation
 
-protocol AnalyticsTracking {
-  func track(_ event: AnalyticsEvent)
+enum CardUpgradeEvent: Equatable {
+  case onAppear
+  case selectOffer(id: String)
+  case tapCTA
+  case retry
+  case dismissModal
+  case modalAccept
 }
 
-enum AnalyticsEvent: Equatable {
-  case screenAppear
-  case screenLoaded(flow: FlowType, hasCupo: Bool)
-  case screenLoadFailed
-
-  case cardSelected(id: String)
-  case ctaTapped(flow: FlowType)
-  case ctaSucceeded(destination: Destination)
-  case ctaFailed(flow: FlowType)
-
-  case modalShown(kind: String)
-  case modalAccepted(kind: String)
-
-  case cupoUpdateStarted
-  case cupoUpdateSucceeded(hasCupo: Bool)
-  case cupoUpdateFailed
-}
-
-final class ConsoleAnalytics: AnalyticsTracking {
-  func track(_ event: AnalyticsEvent) {
-    print("📊 Analytics:", event)
-  }
-}
-
-
-⸻
-
-3) Presentation.swift (State, Events, ViewData + Factories + Presenter)
+CardUpgradeRoute.swift
 
 import Foundation
 
-// MARK: - Presentation State
+enum CardUpgradeRoute: Equatable {
+  case goNext(stepId: String)
+}
 
-struct ModalState: Equatable, Identifiable {
-  enum Kind: Equatable { case loadError, ctaFailed }
+ModalState.swift
+
+import Foundation
+
+struct ModalState: Identifiable, Equatable {
+  enum Kind: Equatable { case loadError, ctaFailed, cupoUpdateFailed }
 
   let id = UUID()
   let kind: Kind
@@ -142,33 +60,57 @@ struct ModalState: Equatable, Identifiable {
   let acceptTitle: String
 }
 
-struct ScreenDomainState: Equatable {
-  enum Phase: Equatable { case idle, loading, loaded, failed }
+CardUpgradeDomainState.swift
 
-  var phase: Phase = .idle
-  var payload: ScreenPayload? = nil
-  var selectedCardId: String? = nil
+import Foundation
+
+struct CardUpgradeDomainState: Equatable {
+  var phase: CardUpgradePhase = .idle
+  var payload: CardUpgradePayload? = nil
+  var selectedOfferId: String? = nil
   var modal: ModalState? = nil
 }
 
-enum ScreenEvent {
-  case onAppear
-  case tapCard(id: String)
-  case tapCTA
-  case retry
-  case dismissModal
-  case modalAccept
+// Payload “normalizado” (en real vendría de Domain/UseCase)
+struct CardUpgradePayload: Equatable {
+  let headerTitle: String
+  let offers: [CardOffer]
+  let flowType: FlowType
+  let hasCupo: Bool
+  let infoBoxText: String
 }
 
-enum ScreenRoute: Equatable {
-  case goDigital(stepId: String)
-  case goPhysicalBranchPicker
+enum FlowType: Equatable { case digital, fisico }
+
+struct CardOffer: Identifiable, Equatable {
+  let id: String
+  let name: String
+  let monthlyFeeText: String        // ej: "Comisión mensual UF 0,40"
+  let imageSystemName: String       // SF Symbol
+  let tipoTarjetaText: String
+  let cupoText: String
+  let beneficios: [String]
+  let tarifas: [KeyValue]
 }
 
-// MARK: - ViewData
+struct KeyValue: Equatable, Identifiable {
+  let id: String
+  let key: String
+  let value: String
+}
 
-struct ScreenViewData: Equatable {
-  let phase: ScreenDomainState.Phase
+
+⸻
+
+2) Presentation/ViewData
+
+CardUpgradeViewData.swift
+
+import Foundation
+
+struct CardUpgradeViewData: Equatable {
+  let phase: CardUpgradePhase
+  let navTitle: String
   let headerTitle: String
   let sections: [SectionVM]
   let cta: CTAVM
@@ -181,215 +123,246 @@ struct CTAVM: Equatable {
 }
 
 enum SectionVM: Equatable, Identifiable {
-  case cards(CardsSectionVM)
-  case banner(BannerSectionVM)
-  case cupo(CupoSectionVM)
-  case info(InfoSectionVM)
+  case offerCarousel(OfferCarouselVM)
+  case textBlock(TextBlockVM)           // Tipo de tarjeta / Cupo
+  case bulletList(BulletListVM)         // Beneficios
+  case keyValueList(KeyValueListVM)     // Tarifas
+  case infoBox(InfoBoxVM)
 
   var id: String {
     switch self {
-    case .cards: return "cards"
-    case .banner: return "banner"
-    case .cupo: return "cupo"
-    case .info: return "info"
+    case .offerCarousel: return "offerCarousel"
+    case .textBlock(let vm): return "textBlock-\(vm.title)"
+    case .bulletList: return "bulletList"
+    case .keyValueList: return "keyValueList"
+    case .infoBox: return "infoBox"
     }
   }
 }
 
-struct CardsSectionVM: Equatable {
-  let items: [CardItemVM]
+struct OfferCarouselVM: Equatable {
+  let items: [OfferCardVM]
   let selectedId: String?
 }
 
-struct CardItemVM: Equatable, Identifiable {
+struct OfferCardVM: Equatable, Identifiable {
   let id: String
+  let imageSystemName: String
   let title: String
   let subtitle: String
-  let imageSystemName: String
 }
 
-struct BannerSectionVM: Equatable { let text: String }
-struct CupoSectionVM: Equatable { let title: String; let amountText: String }
-struct InfoSectionVM: Equatable { let title: String; let body: String }
-
-// MARK: - L10n (catálogo)
-
-enum L10n {
-  static let titleDigital = "Flujo Digital"
-  static let titleFisico  = "Flujo Físico"
-
-  static let noCupoBanner = "Sin cupo disponible"
-  static let cupoTitle    = "Cupo disponible"
-  static let infoTitle    = "Información"
-
-  static let ctaContinue  = "Continuar"
-  static let ctaGoBranch  = "Ir a sucursal"
-
-  static let loadErrorTitle = "Error"
-  static let loadErrorMsg   = "No se pudo cargar la información."
-
-  static let ctaFailTitle = "No se pudo continuar"
-  static let ctaFailMsg   = "Al aceptar, se actualizará el cupo (vía use case) y la vista se actualizará."
-
-  static let accept = "Aceptar"
-  static let retry  = "Reintentar"
-
-  static let loading = "Cargando…"
+struct TextBlockVM: Equatable {
+  let title: String
+  let body: String
 }
 
-// MARK: - Factories (Factory Pattern)
+struct BulletListVM: Equatable {
+  let title: String
+  let items: [String]
+}
+
+struct KeyValueListVM: Equatable {
+  let title: String
+  let rows: [KeyValueRowVM]
+}
+
+struct KeyValueRowVM: Equatable, Identifiable {
+  let id: String
+  let key: String
+  let value: String
+}
+
+struct InfoBoxVM: Equatable {
+  let text: String
+}
+
+
+⸻
+
+3) Presentation/L10n (textos constantes fuera del state)
+
+CardUpgradeL10n.swift
+
+import Foundation
+
+enum CardUpgradeL10n {
+  static let navTitle = "Mejora de Tarjeta"
+  static let ctaContinue = "Continuar"
+  static let ctaRetry = "Reintentar"
+
+  static let sectionTipo = "TIPO DE TARJETA"
+  static let sectionCupo = "CUPO"
+  static let sectionBeneficios = "BENEFICIOS"
+  static let sectionTarifas = "TARIFAS"
+
+  static let modalLoadTitle = "Error"
+  static let modalLoadMsg = "No se pudo cargar la información."
+
+  static let modalCtaFailTitle = "No se pudo continuar"
+  static let modalCtaFailMsg = "Al aceptar, actualizaremos tu cupo y la vista se actualizará."
+
+  static let modalAccept = "Aceptar"
+}
+
+
+⸻
+
+4) Presenter + Factories (Factory Pattern)
+
+Factories (mínimo funcional)
+
+import Foundation
 
 protocol HeaderFactory {
-  func makeHeaderTitle(phase: ScreenDomainState.Phase, payload: ScreenPayload?) -> String
+  func makeHeaderTitle(payload: CardUpgradePayload?) -> String
 }
 
 final class DefaultHeaderFactory: HeaderFactory {
-  func makeHeaderTitle(phase: ScreenDomainState.Phase, payload: ScreenPayload?) -> String {
-    guard let payload else { return L10n.loading }
-    switch payload.flowType {
-    case .digital: return L10n.titleDigital
-    case .fisico:  return L10n.titleFisico
-    }
+  func makeHeaderTitle(payload: CardUpgradePayload?) -> String {
+    payload?.headerTitle ?? "Cargando…"
   }
 }
 
-protocol CardsSectionFactory {
-  func make(payload: ScreenPayload?, selectedId: String?) -> SectionVM?
+protocol OfferCarouselFactory {
+  func make(payload: CardUpgradePayload?, selectedId: String?) -> SectionVM?
 }
 
-final class DefaultCardsSectionFactory: CardsSectionFactory {
-  func make(payload: ScreenPayload?, selectedId: String?) -> SectionVM? {
+final class DefaultOfferCarouselFactory: OfferCarouselFactory {
+  func make(payload: CardUpgradePayload?, selectedId: String?) -> SectionVM? {
     guard let payload else { return nil }
-    let items = payload.cards.map {
-      CardItemVM(id: $0.id, title: $0.title, subtitle: $0.subtitle, imageSystemName: $0.imageKey)
+    let items = payload.offers.map {
+      OfferCardVM(id: $0.id, imageSystemName: $0.imageSystemName, title: $0.name, subtitle: $0.monthlyFeeText)
     }
-    return .cards(.init(items: items, selectedId: selectedId))
+    return .offerCarousel(.init(items: items, selectedId: selectedId))
   }
 }
 
-protocol CupoSectionFactory {
-  func make(payload: ScreenPayload?) -> SectionVM?
+protocol OfferDetailsFactories {
+  func makeTipoSection(offer: CardOffer) -> SectionVM
+  func makeCupoSection(offer: CardOffer) -> SectionVM
+  func makeBeneficiosSection(offer: CardOffer) -> SectionVM
+  func makeTarifasSection(offer: CardOffer) -> SectionVM
 }
 
-final class DefaultCupoSectionFactory: CupoSectionFactory {
-  func make(payload: ScreenPayload?) -> SectionVM? {
+final class DefaultOfferDetailsFactories: OfferDetailsFactories {
+  func makeTipoSection(offer: CardOffer) -> SectionVM {
+    .textBlock(.init(title: CardUpgradeL10n.sectionTipo, body: offer.tipoTarjetaText))
+  }
+  func makeCupoSection(offer: CardOffer) -> SectionVM {
+    .textBlock(.init(title: CardUpgradeL10n.sectionCupo, body: offer.cupoText))
+  }
+  func makeBeneficiosSection(offer: CardOffer) -> SectionVM {
+    .bulletList(.init(title: CardUpgradeL10n.sectionBeneficios, items: offer.beneficios))
+  }
+  func makeTarifasSection(offer: CardOffer) -> SectionVM {
+    let rows = offer.tarifas.map { KeyValueRowVM(id: $0.id, key: $0.key, value: $0.value) }
+    return .keyValueList(.init(title: CardUpgradeL10n.sectionTarifas, rows: rows))
+  }
+}
+
+protocol InfoBoxFactory {
+  func make(payload: CardUpgradePayload?) -> SectionVM?
+}
+
+final class DefaultInfoBoxFactory: InfoBoxFactory {
+  func make(payload: CardUpgradePayload?) -> SectionVM? {
     guard let payload else { return nil }
-    if payload.hasCupo {
-      return .cupo(.init(title: L10n.cupoTitle, amountText: formatCLP(payload.availableAmount)))
-    } else {
-      return .banner(.init(text: L10n.noCupoBanner))
-    }
-  }
-
-  private func formatCLP(_ amount: Decimal) -> String {
-    // demo simple
-    return "$\(amount)"
+    return .infoBox(.init(text: payload.infoBoxText))
   }
 }
 
-protocol InfoSectionFactory {
-  func make(payload: ScreenPayload?, selectedId: String?) -> SectionVM?
+protocol CTAFactory {
+  func make(phase: CardUpgradePhase, selectedOfferId: String?) -> CTAVM
 }
 
-final class DefaultInfoSectionFactory: InfoSectionFactory {
-  func make(payload: ScreenPayload?, selectedId: String?) -> SectionVM? {
-    guard let payload, let selectedId else { return nil }
-    let selected = payload.cards.first { $0.id == selectedId }
-    let body =
-"""
-Seleccionado: \(selected?.title ?? selectedId)
-Usuario: \(payload.userName)
-\(payload.backendMessage ?? "")
-Flow: \(payload.flowType == .digital ? "Digital" : "Físico")
-Cupo: \(payload.hasCupo ? "Sí" : "No")
-"""
-    return .info(.init(title: L10n.infoTitle, body: body))
+final class DefaultCTAFactory: CTAFactory {
+  func make(phase: CardUpgradePhase, selectedOfferId: String?) -> CTAVM {
+    let enabled = (phase == .loaded) && (selectedOfferId != nil)
+    return .init(title: CardUpgradeL10n.ctaContinue, isEnabled: enabled)
   }
 }
 
-protocol CtaFactory {
-  func make(phase: ScreenDomainState.Phase, payload: ScreenPayload?, selectedId: String?) -> CTAVM
+CardUpgradePresenter.swift
+
+import Foundation
+
+protocol CardUpgradeViewDataBuilding {
+  func build(from state: CardUpgradeDomainState) -> CardUpgradeViewData
 }
 
-final class DefaultCtaFactory: CtaFactory {
-  func make(phase: ScreenDomainState.Phase, payload: ScreenPayload?, selectedId: String?) -> CTAVM {
-    guard let payload else { return .init(title: L10n.ctaContinue, isEnabled: false) }
-
-    let title: String = {
-      switch payload.flowType {
-      case .digital: return L10n.ctaContinue
-      case .fisico:  return L10n.ctaGoBranch
-      }
-    }()
-
-    let enabled = (phase == .loaded) && (selectedId != nil)
-    return .init(title: title, isEnabled: enabled)
-  }
-}
-
-// MARK: - Presenter (orquesta factories)
-
-protocol ScreenViewDataBuilding {
-  func build(from domain: ScreenDomainState) -> ScreenViewData
-}
-
-final class ScreenPresenter: ScreenViewDataBuilding {
+final class CardUpgradePresenter: CardUpgradeViewDataBuilding {
   private let headerFactory: HeaderFactory
-  private let cardsFactory: CardsSectionFactory
-  private let cupoFactory: CupoSectionFactory
-  private let infoFactory: InfoSectionFactory
-  private let ctaFactory: CtaFactory
+  private let carouselFactory: OfferCarouselFactory
+  private let detailsFactories: OfferDetailsFactories
+  private let infoBoxFactory: InfoBoxFactory
+  private let ctaFactory: CTAFactory
 
   init(headerFactory: HeaderFactory = DefaultHeaderFactory(),
-       cardsFactory: CardsSectionFactory = DefaultCardsSectionFactory(),
-       cupoFactory: CupoSectionFactory = DefaultCupoSectionFactory(),
-       infoFactory: InfoSectionFactory = DefaultInfoSectionFactory(),
-       ctaFactory: CtaFactory = DefaultCtaFactory()) {
+       carouselFactory: OfferCarouselFactory = DefaultOfferCarouselFactory(),
+       detailsFactories: OfferDetailsFactories = DefaultOfferDetailsFactories(),
+       infoBoxFactory: InfoBoxFactory = DefaultInfoBoxFactory(),
+       ctaFactory: CTAFactory = DefaultCTAFactory()) {
     self.headerFactory = headerFactory
-    self.cardsFactory = cardsFactory
-    self.cupoFactory = cupoFactory
-    self.infoFactory = infoFactory
+    self.carouselFactory = carouselFactory
+    self.detailsFactories = detailsFactories
+    self.infoBoxFactory = infoBoxFactory
     self.ctaFactory = ctaFactory
   }
 
-  func build(from domain: ScreenDomainState) -> ScreenViewData {
-    let header = headerFactory.makeHeaderTitle(phase: domain.phase, payload: domain.payload)
+  func build(from state: CardUpgradeDomainState) -> CardUpgradeViewData {
+    let headerTitle = headerFactory.makeHeaderTitle(payload: state.payload)
 
-    // phase-first: decide secciones base por estado
-    switch domain.phase {
+    switch state.phase {
     case .idle, .loading:
-      return ScreenViewData(
-        phase: domain.phase,
-        headerTitle: header,
+      return CardUpgradeViewData(
+        phase: state.phase,
+        navTitle: CardUpgradeL10n.navTitle,
+        headerTitle: headerTitle,
         sections: [],
-        cta: CTAVM(title: L10n.ctaContinue, isEnabled: false),
-        modal: domain.modal
+        cta: .init(title: CardUpgradeL10n.ctaContinue, isEnabled: false),
+        modal: state.modal
       )
 
     case .failed:
-      // puedes modelar una sección error en vez de modal; aquí mantenemos modal
-      return ScreenViewData(
+      return CardUpgradeViewData(
         phase: .failed,
-        headerTitle: header,
+        navTitle: CardUpgradeL10n.navTitle,
+        headerTitle: headerTitle,
         sections: [],
-        cta: CTAVM(title: L10n.retry, isEnabled: true),
-        modal: domain.modal
+        cta: .init(title: CardUpgradeL10n.ctaRetry, isEnabled: true),
+        modal: state.modal
       )
 
     case .loaded:
       var sections: [SectionVM] = []
-      if let s = cardsFactory.make(payload: domain.payload, selectedId: domain.selectedCardId) { sections.append(s) }
-      if let s = cupoFactory.make(payload: domain.payload) { sections.append(s) }
-      if let s = infoFactory.make(payload: domain.payload, selectedId: domain.selectedCardId) { sections.append(s) }
+      if let s = carouselFactory.make(payload: state.payload, selectedId: state.selectedOfferId) {
+        sections.append(s)
+      }
 
-      let cta = ctaFactory.make(phase: domain.phase, payload: domain.payload, selectedId: domain.selectedCardId)
+      if let payload = state.payload,
+         let sel = state.selectedOfferId,
+         let offer = payload.offers.first(where: { $0.id == sel }) {
 
-      return ScreenViewData(
+        sections.append(detailsFactories.makeTipoSection(offer: offer))
+        sections.append(detailsFactories.makeCupoSection(offer: offer))
+        sections.append(detailsFactories.makeBeneficiosSection(offer: offer))
+        sections.append(detailsFactories.makeTarifasSection(offer: offer))
+      }
+
+      if let s = infoBoxFactory.make(payload: state.payload) {
+        sections.append(s)
+      }
+
+      let cta = ctaFactory.make(phase: state.phase, selectedOfferId: state.selectedOfferId)
+
+      return CardUpgradeViewData(
         phase: .loaded,
-        headerTitle: header,
+        navTitle: CardUpgradeL10n.navTitle,
+        headerTitle: headerTitle,
         sections: sections,
         cta: cta,
-        modal: domain.modal
+        modal: state.modal
       )
     }
   }
@@ -398,212 +371,164 @@ final class ScreenPresenter: ScreenViewDataBuilding {
 
 ⸻
 
-4) ScreenViewModel.swift (orquestador con batching + analítica)
+5) ViewModel Observable (orquestador + batching)
+
+Mock use cases (mínimo para demo)
+
+import Foundation
+
+protocol CardUpgradeUseCases {
+  func load() async throws -> CardUpgradePayload
+  func validateAndContinue(payload: CardUpgradePayload, selectedOfferId: String) async throws -> String // nextStepId
+  func refreshCupoAfterModal(payload: CardUpgradePayload) async throws -> CardUpgradePayload
+}
+
+CardUpgradeViewModel.swift
 
 import Foundation
 
 @MainActor
-final class ScreenViewModel: ObservableObject {
-  @Published private(set) var viewData: ScreenViewData
-  @Published var route: ScreenRoute? = nil
+final class CardUpgradeViewModel: ObservableObject {
+  @Published private(set) var viewData: CardUpgradeViewData
+  @Published var route: CardUpgradeRoute? = nil
 
-  private var domain = ScreenDomainState()
-  private let presenter: ScreenViewDataBuilding
+  private var state = CardUpgradeDomainState()
+  private let presenter: CardUpgradeViewDataBuilding
+  private let useCases: CardUpgradeUseCases
 
-  private let load: LoadScreenUseCase
-  private let startDigital: StartDigitalFlowUseCase
-  private let startPhysical: StartPhysicalFlowUseCase
-  private let updateCupo: UpdateCupoUseCase
+  private var task: Task<Void, Never>?
 
-  private let analytics: AnalyticsTracking
-
-  private var loadTask: Task<Void, Never>?
-  private var actionTask: Task<Void, Never>?
-
-  init(presenter: ScreenViewDataBuilding,
-       load: LoadScreenUseCase,
-       startDigital: StartDigitalFlowUseCase,
-       startPhysical: StartPhysicalFlowUseCase,
-       updateCupo: UpdateCupoUseCase,
-       analytics: AnalyticsTracking) {
+  init(presenter: CardUpgradeViewDataBuilding, useCases: CardUpgradeUseCases) {
     self.presenter = presenter
-    self.load = load
-    self.startDigital = startDigital
-    self.startPhysical = startPhysical
-    self.updateCupo = updateCupo
-    self.analytics = analytics
-
-    self.viewData = presenter.build(from: ScreenDomainState())
+    self.useCases = useCases
+    self.viewData = presenter.build(from: CardUpgradeDomainState())
   }
 
-  func send(_ event: ScreenEvent) {
+  func send(_ event: CardUpgradeEvent) {
     switch event {
     case .onAppear:
-      analytics.track(.screenAppear)
-      loadScreen()
+      load()
 
-    case .tapCard(let id):
-      update { s in
-        s.selectedCardId = id
-      }
-      analytics.track(.cardSelected(id: id))
+    case .selectOffer(let id):
+      update { s in s.selectedOfferId = id }
 
     case .tapCTA:
-      runCTA()
+      if state.phase == .failed { load(); return }
+      continueFlow()
 
     case .retry:
-      loadScreen()
+      load()
 
     case .dismissModal:
       update { $0.modal = nil }
 
     case .modalAccept:
-      modalAcceptFlow()
+      acceptModal()
     }
   }
 
-  // MARK: - Batching update
-
-  private func update(_ mutate: (inout ScreenDomainState) -> Void) {
-    var next = domain
+  // MARK: - Batching update (1 build por evento)
+  private func update(_ mutate: (inout CardUpgradeDomainState) -> Void) {
+    var next = state
     mutate(&next)
-    domain = next
-    viewData = presenter.build(from: domain)
+    state = next
+    viewData = presenter.build(from: state)
   }
 
-  // MARK: - Load
-
-  private func loadScreen() {
-    loadTask?.cancel()
-
+  private func load() {
+    task?.cancel()
     update { s in
       s.phase = .loading
       s.modal = nil
     }
 
-    loadTask = Task { [weak self] in
+    task = Task { [weak self] in
       guard let self else { return }
       do {
-        let payload = try await load.execute()
+        let payload = try await useCases.load()
         update { s in
           s.payload = payload
           s.phase = .loaded
-          if s.selectedCardId == nil {
-            s.selectedCardId = payload.cards.first?.id
+          if s.selectedOfferId == nil {
+            s.selectedOfferId = payload.offers.first?.id
           }
         }
-        analytics.track(.screenLoaded(flow: payload.flowType, hasCupo: payload.hasCupo))
       } catch {
         update { s in
           s.phase = .failed
           s.modal = ModalState(kind: .loadError,
-                               title: L10n.loadErrorTitle,
-                               message: L10n.loadErrorMsg,
-                               acceptTitle: L10n.accept)
+                               title: CardUpgradeL10n.modalLoadTitle,
+                               message: CardUpgradeL10n.modalLoadMsg,
+                               acceptTitle: CardUpgradeL10n.modalAccept)
         }
-        analytics.track(.screenLoadFailed)
-        analytics.track(.modalShown(kind: "loadError"))
       }
     }
   }
 
-  // MARK: - CTA
+  private func continueFlow() {
+    guard let payload = state.payload,
+          let selectedId = state.selectedOfferId,
+          state.phase == .loaded else { return }
 
-  private func runCTA() {
-    guard let payload = domain.payload, let selectedId = domain.selectedCardId else { return }
-    guard domain.phase == .loaded else { return }
-
-    analytics.track(.ctaTapped(flow: payload.flowType))
-
-    actionTask?.cancel()
+    task?.cancel()
     update { s in
       s.phase = .loading
       s.modal = nil
     }
 
-    actionTask = Task { [weak self] in
+    task = Task { [weak self] in
       guard let self else { return }
       do {
-        let dest: Destination
-        switch payload.flowType {
-        case .digital:
-          dest = try await startDigital.execute(payload: payload, selectedCardId: selectedId)
-        case .fisico:
-          dest = try await startPhysical.execute(payload: payload, selectedCardId: selectedId)
-        }
-
-        update { s in
-          s.phase = .loaded
-        }
-
-        analytics.track(.ctaSucceeded(destination: dest))
-
-        switch dest {
-        case .digitalNext(let stepId):
-          route = .goDigital(stepId: stepId)
-        case .physicalBranchPicker:
-          route = .goPhysicalBranchPicker
-        }
+        let stepId = try await useCases.validateAndContinue(payload: payload, selectedOfferId: selectedId)
+        update { s in s.phase = .loaded }
+        route = .goNext(stepId: stepId)
       } catch {
-        // CTA failed -> show modal. accept triggers UpdateCupoUseCase
         update { s in
           s.phase = .loaded
           s.modal = ModalState(kind: .ctaFailed,
-                               title: L10n.ctaFailTitle,
-                               message: L10n.ctaFailMsg,
-                               acceptTitle: L10n.accept)
+                               title: CardUpgradeL10n.modalCtaFailTitle,
+                               message: CardUpgradeL10n.modalCtaFailMsg,
+                               acceptTitle: CardUpgradeL10n.modalAccept)
         }
-        analytics.track(.ctaFailed(flow: payload.flowType))
-        analytics.track(.modalShown(kind: "ctaFailed"))
       }
     }
   }
 
-  // MARK: - Modal accept (Update cupo use case)
-
-  private func modalAcceptFlow() {
-    guard let modal = domain.modal else { return }
-
-    analytics.track(.modalAccepted(kind: "\(modal.kind)"))
+  private func acceptModal() {
+    guard let modal = state.modal else { return }
 
     switch modal.kind {
     case .loadError:
-      // en loadError, aceptar simplemente cierra
       update { $0.modal = nil }
 
-    case .ctaFailed:
-      // en ctaFailed, aceptar => update cupo via UC (y refresca UI)
+    case .ctaFailed, .cupoUpdateFailed:
+      guard let payload = state.payload else {
+        update { $0.modal = nil }
+        return
+      }
+
+      task?.cancel()
       update { s in
         s.modal = nil
         s.phase = .loading
       }
 
-      analytics.track(.cupoUpdateStarted)
-
-      actionTask?.cancel()
-      actionTask = Task { [weak self] in
+      task = Task { [weak self] in
         guard let self else { return }
         do {
-          guard let payload = domain.payload else {
-            update { s in s.phase = .loaded }
-            return
-          }
-          let updatedPayload = try await updateCupo.execute(payload: payload)
+          let updated = try await useCases.refreshCupoAfterModal(payload: payload)
           update { s in
-            s.payload = updatedPayload
+            s.payload = updated
             s.phase = .loaded
           }
-          analytics.track(.cupoUpdateSucceeded(hasCupo: updatedPayload.hasCupo))
         } catch {
           update { s in
             s.phase = .loaded
-            s.modal = ModalState(kind: .ctaFailed,
-                                 title: "No se pudo actualizar cupo",
+            s.modal = ModalState(kind: .cupoUpdateFailed,
+                                 title: "No se pudo actualizar",
                                  message: "Intenta nuevamente.",
-                                 acceptTitle: L10n.accept)
+                                 acceptTitle: CardUpgradeL10n.modalAccept)
           }
-          analytics.track(.cupoUpdateFailed)
-          analytics.track(.modalShown(kind: "cupoUpdateFailed"))
         }
       }
     }
@@ -613,96 +538,19 @@ final class ScreenViewModel: ObservableObject {
 
 ⸻
 
-5) MockRepository.swift (escenarios + CTA success/fail + update cupo)
+6) SwiftUI View (tonta: pinta ViewData)
 
-import Foundation
-
-enum MockError: Error { case forced }
-
-final class MockScreenRepository: ScreenRepository {
-  enum Scenario {
-    case digitalHasCupo
-    case digitalNoCupo
-    case fisicoHasCupo
-    case fisicoNoCupo
-  }
-
-  var scenario: Scenario = .digitalHasCupo
-
-  /// Fuerza fallo del CTA para probar modal -> accept -> update cupo
-  var shouldFailCTA: Bool = true
-
-  /// simula que el backend al “aceptar” actualiza cupo a false
-  var updateCupoSetsFalse: Bool = true
-
-  func fetchScreen() async throws -> ScreenPayload {
-    try await Task.sleep(nanoseconds: 200_000_000)
-
-    let (flow, cupo): (FlowType, Bool) = {
-      switch scenario {
-      case .digitalHasCupo: return (.digital, true)
-      case .digitalNoCupo:  return (.digital, false)
-      case .fisicoHasCupo:  return (.fisico, true)
-      case .fisicoNoCupo:   return (.fisico, false)
-      }
-    }()
-
-    return ScreenPayload(
-      flowType: flow,
-      hasCupo: cupo,
-      userName: "Felipe",
-      availableAmount: 1_250_000,
-      backendMessage: "Mensaje backend: reglas activas.",
-      cards: [
-        BackendCard(id: "cardA", title: "Tarjeta A", subtitle: "Beneficio A", imageKey: "creditcard"),
-        BackendCard(id: "cardB", title: "Tarjeta B", subtitle: "Beneficio B", imageKey: "wallet.pass"),
-        BackendCard(id: "cardC", title: "Tarjeta C", subtitle: "Beneficio C", imageKey: "qrcode")
-      ]
-    )
-  }
-
-  func startDigitalFlow(payload: ScreenPayload, selectedCardId: String) async throws -> Destination {
-    try await Task.sleep(nanoseconds: 200_000_000)
-    if shouldFailCTA { throw MockError.forced }
-    return .digitalNext(stepId: "digital-\(selectedCardId)")
-  }
-
-  func startPhysicalFlow(payload: ScreenPayload, selectedCardId: String) async throws -> Destination {
-    try await Task.sleep(nanoseconds: 200_000_000)
-    if shouldFailCTA { throw MockError.forced }
-    return .physicalBranchPicker
-  }
-
-  func updateCupoAfterFailure(payload: ScreenPayload) async throws -> ScreenPayload {
-    try await Task.sleep(nanoseconds: 200_000_000)
-    // Aquí simulas el backend: “al aceptar, cupo cambia”
-    let newCupo = updateCupoSetsFalse ? false : payload.hasCupo
-
-    return ScreenPayload(
-      flowType: payload.flowType,
-      hasCupo: newCupo,
-      userName: payload.userName,
-      availableAmount: payload.availableAmount,
-      backendMessage: payload.backendMessage,
-      cards: payload.cards
-    )
-  }
-}
-
-
-⸻
-
-6) ScreenView.swift (tonta: solo pinta ViewData)
+CardUpgradeView.swift
 
 import SwiftUI
 
-struct ScreenView: View {
-  @StateObject var vm: ScreenViewModel
+struct CardUpgradeView: View {
+  @StateObject var vm: CardUpgradeViewModel
 
   var body: some View {
-    VStack(spacing: 16) {
+    VStack(spacing: 14) {
       Text(vm.viewData.headerTitle)
-        .font(.title2)
+        .font(.title3)
         .bold()
         .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -711,7 +559,7 @@ struct ScreenView: View {
         ProgressView().frame(maxWidth: .infinity)
 
       case .failed:
-        Button(L10n.retry) { vm.send(.retry) }
+        Button(vm.viewData.cta.title) { vm.send(.retry) }
           .frame(maxWidth: .infinity)
 
       case .loaded:
@@ -719,14 +567,16 @@ struct ScreenView: View {
           render(section)
         }
 
+        Spacer()
+
         Button(vm.viewData.cta.title) { vm.send(.tapCTA) }
           .disabled(!vm.viewData.cta.isEnabled)
           .frame(maxWidth: .infinity)
       }
-
-      Spacer()
     }
     .padding()
+    .navigationTitle(vm.viewData.navTitle)
+    .navigationBarTitleDisplayMode(.inline)
     .onAppear { vm.send(.onAppear) }
     .alert(item: Binding(
       get: { vm.viewData.modal },
@@ -741,58 +591,65 @@ struct ScreenView: View {
       )
     }
     .onChange(of: vm.route) { _, newRoute in
-      guard newRoute != nil else { return }
-      // Aquí integrarías navegación real.
+      guard let newRoute else { return }
+      // Aquí conectarías navegación real (NavigationStack / coordinator)
       // Limpieza:
       vm.route = nil
+      print("Navigate ->", newRoute)
     }
   }
 
   @ViewBuilder
   private func render(_ section: SectionVM) -> some View {
     switch section {
-    case .cards(let s):
-      CardsSection(vm: s) { id in vm.send(.tapCard(id: id)) }
+    case .offerCarousel(let s):
+      OfferCarouselSection(vm: s) { id in vm.send(.selectOffer(id: id)) }
 
-    case .banner(let s):
-      Text(s.text)
-        .padding()
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.yellow.opacity(0.2))
-        .cornerRadius(12)
-
-    case .cupo(let s):
+    case .textBlock(let s):
       VStack(alignment: .leading, spacing: 6) {
-        Text(s.title).font(.headline)
-        Text(s.amountText)
+        Text(s.title).font(.caption).foregroundStyle(.secondary)
+        Text(s.body).font(.body)
       }
-      .padding()
       .frame(maxWidth: .infinity, alignment: .leading)
-      .background(Color.gray.opacity(0.12))
-      .cornerRadius(12)
+      .padding(.top, 6)
 
-    case .info(let s):
+    case .bulletList(let s):
       VStack(alignment: .leading, spacing: 6) {
-        Text(s.title).font(.headline)
-        Text(s.body).font(.subheadline)
+        Text(s.title).font(.caption).foregroundStyle(.secondary)
+        ForEach(s.items, id: \.self) { Text("• \( $0 )").font(.body) }
       }
-      .padding()
       .frame(maxWidth: .infinity, alignment: .leading)
-      .background(Color.blue.opacity(0.08))
-      .cornerRadius(12)
+      .padding(.top, 6)
+
+    case .keyValueList(let s):
+      VStack(alignment: .leading, spacing: 8) {
+        Text(s.title).font(.caption).foregroundStyle(.secondary)
+        ForEach(s.rows) { row in
+          HStack {
+            Text(row.key)
+            Spacer()
+            Text(row.value).foregroundStyle(.secondary)
+          }
+        }
+      }
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .padding(.top, 6)
+
+    case .infoBox(let s):
+      InfoBoxView(vm: s)
     }
   }
 }
 
-struct CardsSection: View {
-  let vm: CardsSectionVM
+struct OfferCarouselSection: View {
+  let vm: OfferCarouselVM
   let onTap: (String) -> Void
 
   var body: some View {
     ScrollView(.horizontal, showsIndicators: false) {
       HStack(spacing: 12) {
         ForEach(vm.items) { item in
-          CardCell(item: item, isSelected: item.id == vm.selectedId)
+          OfferCardView(item: item, isSelected: item.id == vm.selectedId)
             .onTapGesture { onTap(item.id) }
         }
       }
@@ -801,8 +658,8 @@ struct CardsSection: View {
   }
 }
 
-struct CardCell: View {
-  let item: CardItemVM
+struct OfferCardView: View {
+  let item: OfferCardVM
   let isSelected: Bool
 
   var body: some View {
@@ -811,87 +668,157 @@ struct CardCell: View {
         .resizable()
         .scaledToFit()
         .padding(12)
-        .frame(height: 72)
+        .frame(height: 86)
         .frame(maxWidth: .infinity)
-        .background(Color.gray.opacity(0.1))
-        .cornerRadius(10)
+        .background(.gray.opacity(0.1))
+        .cornerRadius(12)
 
       Text(item.title).font(.headline)
-      Text(item.subtitle).font(.subheadline)
+      Text(item.subtitle).font(.subheadline).foregroundStyle(.secondary)
     }
     .padding()
-    .frame(width: 220, alignment: .leading)
-    .background(isSelected ? Color.gray.opacity(0.15) : Color.clear)
+    .frame(width: 260, alignment: .leading)
+    .background(isSelected ? .gray.opacity(0.12) : .clear)
     .overlay(
-      RoundedRectangle(cornerRadius: 12)
-        .stroke(isSelected ? Color.blue : Color.gray.opacity(0.3))
+      RoundedRectangle(cornerRadius: 14)
+        .stroke(isSelected ? .red : .gray.opacity(0.3), lineWidth: 1)
     )
+    .cornerRadius(14)
+  }
+}
+
+struct InfoBoxView: View {
+  let vm: InfoBoxVM
+  var body: some View {
+    HStack(alignment: .top, spacing: 10) {
+      Image(systemName: "info.circle").padding(.top, 2)
+      Text(vm.text).font(.subheadline)
+      Spacer()
+    }
+    .padding()
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(Color.blue.opacity(0.08))
     .cornerRadius(12)
+    .padding(.top, 8)
   }
 }
 
 
 ⸻
 
-7) AppHost.swift (para probar escenarios y comportamiento)
+7) Demo UseCases (mock) para que lo veas funcionando
+
+MockCardUpgradeUseCases.swift
+
+import Foundation
+
+final class MockCardUpgradeUseCases: CardUpgradeUseCases {
+  var shouldFailCTA: Bool = true
+  var hasCupoInitial: Bool = true
+
+  func load() async throws -> CardUpgradePayload {
+    try await Task.sleep(nanoseconds: 200_000_000)
+
+    let offers: [CardOffer] = [
+      CardOffer(
+        id: "offer_infinite",
+        name: "Aurora Infinite",
+        monthlyFeeText: "Comisión mensual UF 0,40",
+        imageSystemName: "creditcard",
+        tipoTarjetaText: "La nueva tarjeta será de tipo Digital.\nUna vez contratada podrás solicitar la versión física.",
+        cupoText: hasCupoInitial ? "Mantendrás el mismo cupo que tienes actualmente." : "No tienes cupo disponible para esta oferta.",
+        beneficios: [
+          "Acumula 0,7% del monto de la compra",
+          "20% dcto. en Ruta Gourmet",
+          "Ingresos gratuitos mensuales a salas VIP"
+        ],
+        tarifas: [
+          KeyValue(id: "t1", key: "Costo mensual", value: "UF 0,40"),
+          KeyValue(id: "t2", key: "Compras internacionales", value: "2,0%"),
+          KeyValue(id: "t3", key: "Avances internacionales", value: "2,5% + US$3,0")
+        ]
+      ),
+      CardOffer(
+        id: "offer_gold",
+        name: "Aurora Gold",
+        monthlyFeeText: "Comisión mensual UF 0,21",
+        imageSystemName: "wallet.pass",
+        tipoTarjetaText: "La nueva tarjeta será de tipo Digital.\nPodrás solicitar la versión física luego.",
+        cupoText: "Mantendrás el mismo cupo que tienes actualmente.",
+        beneficios: [
+          "Acumula 0,3% del monto de la compra",
+          "10% dcto. en Ruta Gourmet"
+        ],
+        tarifas: [
+          KeyValue(id: "g1", key: "Costo mensual", value: "UF 0,21"),
+          KeyValue(id: "g2", key: "Compras internacionales", value: "2,0%")
+        ]
+      )
+    ]
+
+    return CardUpgradePayload(
+      headerTitle: "¡Mejora tu Tarjeta!",
+      offers: offers,
+      flowType: .digital,
+      hasCupo: hasCupoInitial,
+      infoBoxText: "La entrega de la tarjeta se realizará en 24 horas. El plástico puede demorar más."
+    )
+  }
+
+  func validateAndContinue(payload: CardUpgradePayload, selectedOfferId: String) async throws -> String {
+    try await Task.sleep(nanoseconds: 200_000_000)
+    if shouldFailCTA { throw NSError(domain: "cta", code: 1) }
+    return "next-\(selectedOfferId)"
+  }
+
+  func refreshCupoAfterModal(payload: CardUpgradePayload) async throws -> CardUpgradePayload {
+    try await Task.sleep(nanoseconds: 200_000_000)
+    // Simula que “aceptar modal” actualiza cupo a false
+    let updatedOffers = payload.offers.map { offer in
+      if offer.id == "offer_infinite" {
+        return CardOffer(
+          id: offer.id,
+          name: offer.name,
+          monthlyFeeText: offer.monthlyFeeText,
+          imageSystemName: offer.imageSystemName,
+          tipoTarjetaText: offer.tipoTarjetaText,
+          cupoText: "No tienes cupo disponible para esta oferta (actualizado).",
+          beneficios: offer.beneficios,
+          tarifas: offer.tarifas
+        )
+      }
+      return offer
+    }
+
+    return CardUpgradePayload(
+      headerTitle: payload.headerTitle,
+      offers: updatedOffers,
+      flowType: payload.flowType,
+      hasCupo: false,
+      infoBoxText: payload.infoBoxText
+    )
+  }
+}
+
+
+⸻
+
+8) Host para probar
 
 import SwiftUI
 
-struct AppHostView: View {
-  @State private var scenario: MockScreenRepository.Scenario = .digitalHasCupo
-  @State private var failCTA: Bool = true
-
+struct CardUpgradeHostView: View {
   var body: some View {
     NavigationStack {
-      VStack(spacing: 12) {
-        controls
-        ScreenView(vm: makeVM())
-          .navigationTitle("Demo")
-          .navigationBarTitleDisplayMode(.inline)
-      }
-      .padding(.horizontal)
-    }
-  }
+      let useCases = MockCardUpgradeUseCases()
+      useCases.shouldFailCTA = true
 
-  private var controls: some View {
-    VStack(alignment: .leading, spacing: 8) {
-      Picker("Escenario", selection: $scenario) {
-        Text("Digital + Cupo").tag(MockScreenRepository.Scenario.digitalHasCupo)
-        Text("Digital + No Cupo").tag(MockScreenRepository.Scenario.digitalNoCupo)
-        Text("Físico + Cupo").tag(MockScreenRepository.Scenario.fisicoHasCupo)
-        Text("Físico + No Cupo").tag(MockScreenRepository.Scenario.fisicoNoCupo)
-      }
-      .pickerStyle(.menu)
+      let vm = CardUpgradeViewModel(
+        presenter: CardUpgradePresenter(),
+        useCases: useCases
+      )
 
-      Toggle("Forzar fallo CTA (modal)", isOn: $failCTA)
-    }
-    .padding(.vertical, 8)
-  }
-
-  private func makeVM() -> ScreenViewModel {
-    let repo = MockScreenRepository()
-    repo.scenario = scenario
-    repo.shouldFailCTA = failCTA
-
-    let presenter = ScreenPresenter()
-    let analytics = ConsoleAnalytics()
-
-    return ScreenViewModel(
-      presenter: presenter,
-      load: LoadScreenUseCase(repo: repo),
-      startDigital: StartDigitalFlowUseCase(repo: repo),
-      startPhysical: StartPhysicalFlowUseCase(repo: repo),
-      updateCupo: UpdateCupoUseCase(repo: repo),
-      analytics: analytics
-    )
-  }
-}
-
-@main
-struct DemoApp: App {
-  var body: some Scene {
-    WindowGroup {
-      AppHostView()
+      CardUpgradeView(vm: vm)
     }
   }
 }
@@ -899,21 +826,15 @@ struct DemoApp: App {
 
 ⸻
 
-Qué casos de uso cubre (exactamente lo que pediste)
-	1.	Obtener info del backend → LoadScreenUseCase
-	2.	Flags flowType y hasCupo → secciones condicionales por Presenter + factories
-	3.	Textos constantes → L10n (no en state)
-	4.	Cards con imagen + selección → cambia sección Info y habilita CTA
-	5.	CTA valida flujo → VM elige use case según flowType
-	6.	Success → route para navegar
-	7.	Fail → modal
-	8.	Aceptar modal → UpdateCupoUseCase → cambia hasCupo → Presenter cambia UI
-	9.	Analítica en acciones clave (screenLoaded, cardSelected, ctaFailed, modalAccepted, cupoUpdateSucceeded, etc.)
+Qué se logra con esta implementación (según tu conversación)
+	•	La View no decide negocio: no hace switch de flujo ni visibilidad por flags.
+	•	phase gobierna loading/error/loaded.
+	•	Presenter + factories construyen toda la pantalla con secciones como tu imagen.
+	•	Selección de tarjeta cambia el contenido mostrado.
+	•	CTA ejecuta flujo (en mock falla → muestra modal).
+	•	Aceptar modal ejecuta use case para refrescar cupo y se actualiza la UI.
+	•	Preparado para meter analítica en el ViewModel en los send() (sin tocar View).
 
 ⸻
 
-Si quieres el siguiente “punto de control” (muy útil), lo que haría ahora es agregar tests (sin SwiftUI) para validar:
-	•	Presenter.build() con payload cupo/no cupo
-	•	VM.tapCTA falla → modal → accept → cupo false (por UC) → sections cambian
-
-Dime si prefieres tests con XCTest (iOS) o si lo dejamos solo en la app demo.
+Si me dices si quieres que el CTA quede como botón fijo abajo (como en tu imagen) sobre un ScrollView, te ajusto el layout con ScrollView + safeAreaInset(edge: .bottom) para un footer fijo, sin romper el patrón “View tonta”.
