@@ -1,0 +1,353 @@
+Te entiendo perfecto, y tienes razón en varias cosas. Voy a separar “qué está mal / qué está bien” y dejarte la versión correcta de la capa Data sin mezclar negocio, y además aclarar el tema del 412 y de flowMode.
+
+1) Qué NO debe hacer Data (y por qué)
+
+❌ Data NO debe:
+	•	Crear textos de UI ("Tarjeta digital", "Mantendrás tu cupo...", "—").
+	•	Inferir flowMode (withLimit/noLimit) desde el load.
+	•	Convertir status 412 a una regla de flujo (“si 412 entonces modal”).
+Eso es una decisión de caso de uso (UseCase) / flujo.
+
+✅ Data SÍ debe:
+	•	Traducir DTO → Domain (anti-corruption layer).
+	•	Normalizar estructuras para que sean consumibles (ej. benefits y card_rates como Dictionary → Array).
+	•	Preservar información del backend (keys, valores, currency, amount, percentage, etc.) sin “interpretarla” como negocio.
+	•	Entregar errores de forma técnica/neutral (ej. HTTP status, errorCode, payload error), para que Domain decida el flujo.
+
+⸻
+
+2) El punto crítico: el 412
+
+Aquí está la diferencia fina:
+	•	Data puede (y normalmente debe) exponer el status code como parte de un error técnico (porque es transporte/infra).
+	•	Domain/UseCase decide qué significa ese 412:
+	•	en modo cupo → mostrar modal
+	•	en modo no cupo → error genérico
+
+O sea: Data no decide “modal”, pero sí puede decir: “falló con status 412”.
+
+✅ Diseño correcto:
+	•	Data lanza RepositoryError.http(status: Int, body: ErrorDTO?)
+	•	UseCase captura y decide la política del flujo.
+
+⸻
+
+3) “FlowMode” tampoco es Data
+
+flowMode (con cupo / sin cupo) es estado del flujo, no DTO.
+Lo define el ViewModel/UseCase como runtime state.
+	•	Puede venir un flag inicial desde backend → eso sí es data.
+Pero “qué significa” y cómo se usa, sigue siendo dominio/flujo.
+
+⸻
+
+4) Tu idea de normalización está correcta
+
+Tú quieres esto:
+	•	Backend entrega:
+	•	benefits: { key: {title,value}, ... }
+	•	card_rates: { key: {title, amount/currency/percentage/value_per_transaction}, ... }
+
+Y quieres un Domain model legible:
+
+struct OfferModel {
+  let current: CardModel
+  let offered: [CardModel]
+}
+
+struct CardModel {
+  let benefits: [Benefit]
+  let rates: [Rate]
+  let cardArtBase64: String
+}
+
+struct Rate {
+  let key: String
+  let title: String
+  let value: RateValue
+}
+
+enum RateValue {
+  case amount(Decimal, currency: String)
+  case percentage(Decimal)
+  case perTransaction(String)
+  case unknown
+}
+
+✅ Eso es exactamente anti-corruption + normalización.
+Y sin texto. La View o Presenter decide cómo renderizar RateValue.
+
+⸻
+
+5) Versión “correcta” de Data (punto de control)
+
+A continuación te dejo una implementación Data ajustada a lo que estás pidiendo:
+	•	Repository solo orquesta
+	•	Mapper solo transforma DTO → Domain
+	•	Sin UI strings
+	•	Sin flowMode
+	•	Sin “412 → modal”
+	•	Errors neutrales con status code
+
+⸻
+
+5.1 Errores neutros (Data)
+
+// Data/Remote/RepositoryError.swift
+import Foundation
+
+enum RepositoryError: Error, Equatable {
+  case http(status: Int, message: String?)
+  case decoding
+  case transport(String)
+  case unknown
+}
+
+protocol HTTPStatusCodeProviding: Error { var statusCode: Int { get } }
+protocol HTTPMessageProviding: Error { var message: String? { get } }
+
+struct RepositoryErrorMapper {
+  func map(_ error: Error) -> RepositoryError {
+    if let e = error as? HTTPStatusCodeProviding {
+      let msg = (error as? HTTPMessageProviding)?.message
+      return .http(status: e.statusCode, message: msg)
+    }
+    // agrega casos según tu client generado
+    return .unknown
+  }
+}
+
+
+⸻
+
+5.2 Modelos Domain “puros” (sin UI)
+
+(asumo que estos viven en Domain, pero los pongo para contexto del mapper)
+
+// Domain/Entities/OfferModel.swift
+struct OfferModel {
+  let identification: OfferIdentification
+  let details: OfferDetails
+  let creditLimit: CreditLimitModel?
+}
+
+struct OfferIdentification {
+  let evaluationId: String
+  let operationId: String?
+  let maskedCardNumber: String?
+}
+
+struct OfferDetails {
+  let current: CardModel
+  let offered: [CardModel]
+}
+
+struct CardModel: Identifiable {
+  let id: String // stable
+  let benefits: [BenefitModel]
+  let rates: [RateModel]
+  let cardArtBase64: String?
+}
+
+struct BenefitModel: Identifiable {
+  let id: String // key backend
+  let title: String?
+  let value: String?
+}
+
+struct RateModel: Identifiable {
+  let id: String // key backend
+  let title: String?
+  let value: RateValueModel
+}
+
+enum RateValueModel: Equatable {
+  case amount(Decimal, currency: String)
+  case percentage(Decimal)
+  case perTransaction(String)
+  case unknown
+}
+
+
+⸻
+
+5.3 Mapper (DTO → Domain) sin inventar strings
+
+// Data/Mappers/OfferModelMapper.swift
+import Foundation
+
+struct OfferModelMapper {
+
+  private let cardMapper: CardModelMapper
+  private let creditLimitMapper: CreditLimitMapper
+
+  init(cardMapper: CardModelMapper, creditLimitMapper: CreditLimitMapper) {
+    self.cardMapper = cardMapper
+    self.creditLimitMapper = creditLimitMapper
+  }
+
+  func map(_ dto: GetOfferResponseDTO) throws -> OfferModel {
+    guard
+      let data = dto.data,
+      let offer = data.offer,
+      let identification = offer.identification,
+      let details = offer.details
+    else { throw RepositoryError.decoding }
+
+    let idModel = OfferIdentification(
+      evaluationId: identification.evaluationId ?? "",
+      operationId: identification.operationId,
+      maskedCardNumber: identification.maskedCardNumber
+    )
+
+    let current = try cardMapper.map(details.current, fallbackId: "current")
+    let offered = try normalizeOffered(details.offered)
+      .enumerated()
+      .map { idx, cardDto in try cardMapper.map(cardDto, fallbackId: "offered_\(idx)") }
+
+    let detailsModel = OfferDetails(current: current, offered: offered)
+
+    let creditLimit = creditLimitMapper.map(offer.creditLimit)
+
+    return OfferModel(
+      identification: idModel,
+      details: detailsModel,
+      creditLimit: creditLimit
+    )
+  }
+
+  // Ajusta según tu tipo real; aquí lo hago genérico.
+  private func normalizeOffered(_ offered: OfferedDTOContainer) -> [CardProductDTO] {
+    switch offered {
+    case .array(let arr): return arr
+    case .dictionary(let dict): return dict.values.map { $0 }
+    case .single(let one): return [one]
+    }
+  }
+}
+
+
+⸻
+
+5.4 Card mapper: beneficios/rates como arrays, value tipado
+
+// Data/Mappers/CardModelMapper.swift
+import Foundation
+
+struct CardModelMapper {
+
+  func map(_ dto: CardProductDTO, fallbackId: String) throws -> CardModel {
+    let id = dto.bulletCode ?? dto.cardId ?? fallbackId
+
+    let benefits = mapBenefits(dto.benefits)
+    let rates = mapRates(dto.cardRates)
+
+    return CardModel(
+      id: id,
+      benefits: benefits,
+      rates: rates,
+      cardArtBase64: dto.cardArt
+    )
+  }
+
+  private func mapBenefits(_ dict: [String: BenefitDTO]?) -> [BenefitModel] {
+    guard let dict else { return [] }
+    return dict.map { key, value in
+      BenefitModel(id: key, title: value.title, value: value.value)
+    }
+    // orden si el dominio lo requiere, pero idealmente lo decide Presenter o Policy
+  }
+
+  private func mapRates(_ dict: [String: FeeDTO]?) -> [RateModel] {
+    guard let dict else { return [] }
+    return dict.map { key, fee in
+      RateModel(id: key, title: fee.title, value: mapRateValue(fee))
+    }
+  }
+
+  private func mapRateValue(_ fee: FeeDTO) -> RateValueModel {
+    if let s = fee.valuePerTransaction, !s.isEmpty { return .perTransaction(s) }
+    if let p = fee.percentage { return .percentage(Decimal(p)) }
+    if let a = fee.amount, let c = fee.currency { return .amount(Decimal(a), currency: c) }
+    return .unknown
+  }
+}
+
+Fíjate: sin strings tipo “—”, sin formatear, sin “UF”, sin “CLP”.
+Sólo “valor tipado” para que Presenter/View decidan cómo mostrarlo.
+
+⸻
+
+5.5 Repository: devuelve Domain model o error neutro
+
+// Data/Repositories/DefaultCardUpgradeRepository.swift
+import Foundation
+
+final class DefaultCardUpgradeRepository {
+
+  private let api: CardUpgradeAPI
+  private let mapper: OfferModelMapper
+  private let errorMapper: RepositoryErrorMapper
+
+  init(api: CardUpgradeAPI, mapper: OfferModelMapper, errorMapper: RepositoryErrorMapper) {
+    self.api = api
+    self.mapper = mapper
+    self.errorMapper = errorMapper
+  }
+
+  func getOfferModel(request: [String: Any]) async throws -> OfferModel {
+    do {
+      let dto = try await api.getOffer(request: request)
+      return try mapper.map(dto)
+    } catch {
+      throw errorMapper.map(error)
+    }
+  }
+
+  func validateLimits(request: [String: Any]) async throws -> ValidateLimitsResponseDTO {
+    do {
+      return try await api.validateLimits(request: request)
+    } catch {
+      // NO decides 412 => modal. Solo propagas status.
+      throw errorMapper.map(error)
+    }
+  }
+}
+
+
+⸻
+
+6) Entonces, ¿dónde se decide el orden de tariffs/benefits?
+
+Tu ejemplo de keys:
+	•	monthly_fee
+	•	semiannual_plan_fee
+	•	etc.
+
+Eso puede ser:
+	•	Presentation policy (Presenter) si es “orden visual”
+	•	o Domain policy si es “orden de negocio” (pero sigue sin UI strings)
+
+✅ Recomendación práctica:
+	•	Presenter define el orden visual (porque depende del diseño de la pantalla).
+	•	Data solo mapea y mantiene key + contenido.
+
+⸻
+
+7) Resumen directo a tu crítica
+
+✅ Correcto lo que estás pidiendo:
+	•	Data: mapea y normaliza, sin inventar textos.
+	•	UseCase: interpreta RepositoryError.http(412) y decide modal/flujo.
+	•	Presenter: decide títulos/strings y qué se muestra.
+
+Lo que yo puse antes (mapear 412 directamente a ValidateLimitsResponse.preconditionRequired) es “aceptable” si tu Domain define ese resultado como técnico (no de flujo).
+Pero si tu estándar es: “Domain no sabe nada de HTTP” entonces mejor como lo dejamos ahora: RepositoryError.http(status) y el UseCase decide.
+
+⸻
+
+Si quieres, el siguiente “punto de control” es dejar el UseCase limpio con esta firma:
+	•	loadUseCase -> OfferModel
+	•	continueUseCase captura RepositoryError.http(412) y retorna ContinueResult
+
+y ahí sí aplicamos tu flujo exacto (200/412 con cupo vs no cupo) sin tocar Data.
