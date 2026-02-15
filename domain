@@ -1,0 +1,363 @@
+Excelente 👌
+Ahora sí vamos a diseñar la capa de Dominio correctamente, limpia, sin UI, sin HTTP, sin OpenAPI, sin SwiftUI.
+
+Aquí es donde realmente se define:
+	•	las reglas duras del negocio
+	•	el flujo 200 / 412
+	•	la política de continuar
+	•	la construcción del request
+	•	y el contrato con Data
+
+⸻
+
+🎯 Objetivo de la capa Domain
+
+El dominio debe:
+	1.	No conocer DTOs
+	2.	No conocer HTTP
+	3.	No conocer SwiftUI
+	4.	No formatear textos
+	5.	No decidir navegación UI
+	6.	Sí decidir reglas de negocio
+
+⸻
+
+🧱 1) Entidades de Dominio
+
+Basadas en lo que ya normalizamos en Data.
+
+⸻
+
+1.1 OfferModel
+
+// Domain/Entities/OfferModel.swift
+
+struct OfferModel {
+    let identification: OfferIdentification
+    let details: OfferDetails
+    let creditLimit: CreditLimitModel?
+}
+
+
+⸻
+
+1.2 Identification
+
+struct OfferIdentification {
+    let evaluationId: String
+    let operationId: String?
+    let maskedCardNumber: String?
+}
+
+
+⸻
+
+1.3 Details
+
+struct OfferDetails {
+    let current: CardModel
+    let offered: [CardModel]
+}
+
+
+⸻
+
+1.4 CardModel
+
+struct CardModel: Identifiable {
+    let id: String
+    let benefits: [BenefitModel]
+    let rates: [RateModel]
+    let cardArtBase64: String?
+}
+
+
+⸻
+
+1.5 Benefit
+
+struct BenefitModel: Identifiable {
+    let id: String
+    let title: String?
+    let value: String?
+}
+
+
+⸻
+
+1.6 Rate
+
+struct RateModel: Identifiable {
+    let id: String
+    let title: String?
+    let value: RateValueModel
+}
+
+enum RateValueModel: Equatable {
+    case amount(Decimal, currency: String)
+    case percentage(Decimal)
+    case perTransaction(String)
+    case unknown
+}
+
+
+⸻
+
+1.7 Credit Limit
+
+struct CreditLimitModel {
+    let buckets: [CreditLimitBucket]
+}
+
+struct CreditLimitBucket: Identifiable {
+    enum Kind {
+        case national
+        case international
+    }
+
+    let id: String
+    let kind: Kind
+    let current: Money
+    let minimumIncrease: Money
+    let maximumIncrease: Money
+}
+
+struct Money: Equatable {
+    let amount: Decimal
+    let currency: String
+}
+
+
+⸻
+
+🧠 2) Estados de Flujo del Dominio
+
+Aquí definimos la lógica dura.
+
+⸻
+
+2.1 Flow Mode
+
+enum UpgradeFlowMode: Equatable {
+    case withLimit
+    case noLimit
+}
+
+
+⸻
+
+2.2 Resultado del Continue (NO UI)
+
+enum ContinueResult: Equatable {
+    case proceed(operationId: String)
+    case requiresSwitchToNoLimit
+    case failure
+}
+
+Observa:
+	•	NO hay modal
+	•	NO hay navegación
+	•	NO hay strings
+
+Solo intención de negocio.
+
+⸻
+
+📦 3) Contrato del Repository (Dominio)
+
+Domain depende de un protocolo.
+
+protocol CardUpgradeRepository {
+    func loadOffer(request: [String: Any]) async throws -> OfferModel
+    func validateLimits(request: [String: Any]) async throws -> String
+}
+
+Observa:
+	•	validateLimits devuelve operationId
+	•	Si falla → lanza error
+	•	No devuelve status HTTP
+
+⸻
+
+🧠 4) Use Cases (Aquí vive el negocio real)
+
+⸻
+
+4.1 LoadOfferUseCase
+
+final class LoadOfferUseCase {
+
+    private let repository: CardUpgradeRepository
+
+    init(repository: CardUpgradeRepository) {
+        self.repository = repository
+    }
+
+    func execute(request: [String: Any]) async throws -> OfferModel {
+        try await repository.loadOffer(request: request)
+    }
+}
+
+Simple. No hay lógica.
+
+⸻
+
+4.2 ContinueUseCase (Aquí está lo importante)
+
+Este es el núcleo del flujo 200 / 412.
+
+final class ContinueUpgradeUseCase {
+
+    private let repository: CardUpgradeRepository
+
+    init(repository: CardUpgradeRepository) {
+        self.repository = repository
+    }
+
+    func execute(
+        request: [String: Any],
+        flowMode: UpgradeFlowMode
+    ) async -> ContinueResult {
+
+        do {
+            let operationId = try await repository.validateLimits(request: request)
+            return .proceed(operationId: operationId)
+
+        } catch let error as RepositoryError {
+
+            if case .http(let status, _) = error, status == 412 {
+
+                // REGLA DURA DEL NEGOCIO
+                if flowMode == .withLimit {
+                    return .requiresSwitchToNoLimit
+                } else {
+                    return .failure
+                }
+            }
+
+            return .failure
+
+        } catch {
+            return .failure
+        }
+    }
+}
+
+🔥 Aquí está la regla:
+	•	412 + withLimit → pedir cambio a noLimit
+	•	412 + noLimit → error genérico
+	•	otros → error
+
+Esto es negocio.
+No es UI.
+No es Data.
+
+⸻
+
+🧠 5) Request Builder (Dominio puro)
+
+Dominio también puede construir el payload:
+
+struct ContinueRequestBuilder {
+
+    func build(
+        evaluationId: String,
+        selectedCardId: String,
+        flowMode: UpgradeFlowMode
+    ) -> [String: Any] {
+
+        return [
+            "evaluation_id": evaluationId,
+            "card_id": selectedCardId,
+            "apply_limit": flowMode == .withLimit
+        ]
+    }
+}
+
+Observa:
+	•	El dominio decide que withLimit → "apply_limit": true
+	•	No lo hace ViewModel
+	•	No lo hace Data
+
+⸻
+
+🧠 6) Política opcional (si quieres escalar)
+
+Si quieres hacerlo aún más limpio:
+
+struct ContinuePolicy {
+
+    func evaluate(statusCode: Int, flowMode: UpgradeFlowMode) -> ContinueResult {
+
+        if statusCode == 412 && flowMode == .withLimit {
+            return .requiresSwitchToNoLimit
+        }
+
+        if statusCode == 412 {
+            return .failure
+        }
+
+        return .failure
+    }
+}
+
+Esto te permite testear política aislada.
+
+⸻
+
+🧪 7) Tests de Dominio (lo más importante)
+
+Ejemplo:
+
+func test_412_withLimit_returnsRequiresSwitch() async {
+    let repo = MockRepo(status: 412)
+    let useCase = ContinueUpgradeUseCase(repository: repo)
+
+    let result = await useCase.execute(request: [:], flowMode: .withLimit)
+
+    XCTAssertEqual(result, .requiresSwitchToNoLimit)
+}
+
+Aquí se valida el negocio sin UI.
+
+⸻
+
+🎯 Arquitectura final hasta ahora
+
+View
+   ↓ events
+ViewModel
+   ↓
+ContinueUpgradeUseCase
+   ↓
+Repository (protocol)
+   ↓
+Data layer
+   ↓
+API
+
+
+⸻
+
+🔥 Lo más importante que tu equipo debe entender
+
+✔ Data normaliza
+✔ Domain decide reglas
+✔ Presenter decide qué mostrar
+✔ View solo renderiza
+
+⸻
+
+🚀 Próximo paso lógico
+
+Ahora que Domain está correcto, el siguiente nivel es:
+
+👉 Construir el ViewModel orquestador que combine:
+	•	LoadUseCase
+	•	ContinueUseCase
+	•	State interno
+	•	Presenter
+
+Y ahí veremos cómo se conecta todo sin romper separación.
+
+Si quieres seguimos con eso.
