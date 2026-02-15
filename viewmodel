@@ -1,0 +1,374 @@
+Perfecto 👌
+Ahora entramos en la parte más delicada: ViewModel como orquestador puro, respetando todo lo que acabamos de construir:
+	•	Data normaliza
+	•	Domain decide reglas
+	•	Presenter traduce estado a UI
+	•	View solo renderiza
+
+El ViewModel no contiene reglas de negocio, pero sí:
+	•	Mantiene el estado runtime
+	•	Orquesta use cases
+	•	Dispara navegación
+	•	Reconstruye ViewData usando Presenter
+	•	Maneja fases (loading / error)
+	•	Gestiona modal
+	•	Gestiona route one-shot
+
+⸻
+
+🧠 1️⃣ Diseño mental correcto del ViewModel
+
+El ViewModel tiene:
+
+1. State interno (source of truth)
+
+No observable fuera.
+
+2. ViewData derivada (observable)
+
+@Published private(set) var viewData
+
+3. UseCases
+	•	LoadOfferUseCase
+	•	ContinueUpgradeUseCase
+	•	ContinueRequestBuilder
+
+4. Presenter
+	•	build(state) -> ViewData
+
+⸻
+
+🧱 2️⃣ State interno (runtime + snapshot)
+
+// Presentation/State/CardUpgradeScreenState.swift
+
+struct CardUpgradeScreenState {
+
+    enum ScreenPhase {
+        case idle
+        case loading
+        case loaded
+        case failed
+    }
+
+    enum ActionPhase {
+        case idle
+        case loading
+    }
+
+    var phase: ScreenPhase = .idle
+    var actionPhase: ActionPhase = .idle
+
+    var snapshot: OfferModel?
+    var selectedCardId: String?
+    var flowMode: UpgradeFlowMode = .withLimit
+
+    var modal: ModalState?
+    var route: Route?
+}
+
+
+⸻
+
+🧭 3️⃣ Route (one-shot navigation)
+
+enum Route: Equatable {
+    case next(operationId: String, flowMode: UpgradeFlowMode)
+    case goHome
+}
+
+
+⸻
+
+🪟 4️⃣ Modal
+
+struct ModalState: Equatable {
+    enum Kind {
+        case switchToNoLimit
+        case genericError
+    }
+
+    let kind: Kind
+}
+
+
+⸻
+
+🚀 5️⃣ ViewModel completo
+
+// Presentation/ViewModel/CardUpgradeViewModel.swift
+
+import Foundation
+
+@MainActor
+final class CardUpgradeViewModel: ObservableObject {
+
+    // MARK: - Published
+
+    @Published private(set) var viewData: CardUpgradeViewData
+
+    // MARK: - Dependencies
+
+    private let loadUseCase: LoadOfferUseCase
+    private let continueUseCase: ContinueUpgradeUseCase
+    private let requestBuilder: ContinueRequestBuilder
+    private let presenter: CardUpgradePresenter
+
+    // MARK: - Internal State
+
+    private var state = CardUpgradeScreenState()
+
+    private var loadTask: Task<Void, Never>?
+    private var actionTask: Task<Void, Never>?
+
+    // MARK: - Init
+
+    init(
+        loadUseCase: LoadOfferUseCase,
+        continueUseCase: ContinueUpgradeUseCase,
+        requestBuilder: ContinueRequestBuilder,
+        presenter: CardUpgradePresenter
+    ) {
+        self.loadUseCase = loadUseCase
+        self.continueUseCase = continueUseCase
+        self.requestBuilder = requestBuilder
+        self.presenter = presenter
+
+        self.viewData = presenter.build(from: state)
+    }
+}
+
+
+⸻
+
+🧠 6️⃣ Helper update (transaccional)
+
+Evita múltiples renders.
+
+private extension CardUpgradeViewModel {
+
+    func update(_ mutate: (inout CardUpgradeScreenState) -> Void) {
+        var next = state
+        mutate(&next)
+        state = next
+        viewData = presenter.build(from: state)
+    }
+}
+
+
+⸻
+
+📥 7️⃣ Load Flow
+
+extension CardUpgradeViewModel {
+
+    func onAppear() {
+        guard state.phase == .idle else { return }
+
+        loadTask?.cancel()
+
+        loadTask = Task {
+            update { $0.phase = .loading }
+
+            do {
+                let snapshot = try await loadUseCase.execute(request: [:])
+
+                update {
+                    $0.snapshot = snapshot
+                    $0.phase = .loaded
+                    $0.selectedCardId = snapshot.details.offered.first?.id
+                    $0.flowMode = .withLimit
+                }
+
+            } catch {
+                update { $0.phase = .failed }
+            }
+        }
+    }
+}
+
+
+⸻
+
+🎯 8️⃣ Selección de tarjeta
+
+NO cambia snapshot.
+Solo runtime.
+
+func selectCard(id: String) {
+    update { $0.selectedCardId = id }
+}
+
+
+⸻
+
+▶️ 9️⃣ Tap Continue (orquestación limpia)
+
+func tapContinue() {
+
+    guard
+        let snapshot = state.snapshot,
+        let selectedId = state.selectedCardId
+    else { return }
+
+    actionTask?.cancel()
+
+    actionTask = Task {
+
+        update { $0.actionPhase = .loading }
+
+        let request = requestBuilder.build(
+            evaluationId: snapshot.identification.evaluationId,
+            selectedCardId: selectedId,
+            flowMode: state.flowMode
+        )
+
+        let result = await continueUseCase.execute(
+            request: request,
+            flowMode: state.flowMode
+        )
+
+        handleContinueResult(result)
+    }
+}
+
+
+⸻
+
+🧠 10️⃣ Interpretación del resultado (NO negocio, solo orquestación)
+
+private func handleContinueResult(_ result: ContinueResult) {
+
+    switch result {
+
+    case .proceed(let operationId):
+        update {
+            $0.actionPhase = .idle
+            $0.route = .next(operationId: operationId, flowMode: $0.flowMode)
+        }
+
+    case .requiresSwitchToNoLimit:
+        update {
+            $0.actionPhase = .idle
+            $0.modal = ModalState(kind: .switchToNoLimit)
+        }
+
+    case .failure:
+        update {
+            $0.actionPhase = .idle
+            $0.modal = ModalState(kind: .genericError)
+        }
+    }
+}
+
+
+⸻
+
+🪟 11️⃣ Modal actions
+
+func modalPrimaryAction() {
+
+    guard let modal = state.modal else { return }
+
+    switch modal.kind {
+
+    case .switchToNoLimit:
+        update {
+            $0.flowMode = .noLimit
+            $0.modal = nil
+        }
+
+    case .genericError:
+        update { $0.modal = nil }
+    }
+}
+
+func modalSecondaryAction() {
+
+    guard let modal = state.modal else { return }
+
+    switch modal.kind {
+
+    case .switchToNoLimit:
+        update {
+            $0.modal = nil
+            $0.route = .goHome
+        }
+
+    case .genericError:
+        update { $0.modal = nil }
+    }
+}
+
+
+⸻
+
+🔄 12️⃣ Consumir route (one-shot)
+
+func consumeRoute() {
+    update { $0.route = nil }
+}
+
+
+⸻
+
+🔥 ¿Qué logramos aquí?
+
+1️⃣ El ViewModel no decide reglas de negocio
+
+Eso lo hizo ContinueUpgradeUseCase.
+
+2️⃣ El ViewModel no crea textos
+
+Eso lo hace el Presenter.
+
+3️⃣ El ViewModel no interpreta HTTP
+
+Eso lo hizo Domain + RepositoryError.
+
+4️⃣ El ViewModel sí:
+	•	Orquesta
+	•	Cambia state
+	•	Publica ViewData
+	•	Maneja fases
+	•	Maneja navegación
+
+⸻
+
+🧠 Flujo completo visual
+
+User Tap
+   ↓
+ViewModel.tapContinue()
+   ↓
+ContinueUseCase.execute()
+   ↓
+Repository (Data)
+   ↓
+API
+   ↓
+UseCase decide resultado
+   ↓
+ViewModel actualiza state
+   ↓
+Presenter.build(state)
+   ↓
+View render
+
+
+⸻
+
+🚀 Siguiente paso natural
+
+Ahora tenemos:
+
+✔ Data limpia
+✔ Domain limpio
+✔ ViewModel limpio
+
+El siguiente paso lógico es:
+
+👉 Construir el Presenter y ViewData completos basados en la pantalla real,
+para que veas cómo se traduce flowMode, selectedCard, rates, benefits a UI.
+
+Si quieres, lo hacemos ahora con diseño exacto de la pantalla que mostraste.
