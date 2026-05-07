@@ -1,51 +1,48 @@
-# Summary
+## Context
+The application needs a dedicated integration layer for BioCatch in order to avoid direct dependencies on the vendor SDK from the app host or feature modules.
 
-This PR introduces the initial implementation of the BioCatch module as a dedicated Swift Package, providing a clear separation between SDK integration concerns and the public contracts consumed by feature modules.
+This PR introduces the initial module-level integration required to centralize SDK setup, runtime usage, and backend validation support while keeping vendor-specific constraints encapsulated.
 
-The module was designed to encapsulate the vendor SDK behind our own abstractions, keeping the integration isolated, testable, and easier to evolve without leaking vendor-specific details into consumers.
+## Objective
+Establish the foundational BioCatch integration layer by:
+- encapsulating the vendor SDK,
+- enabling configuration and initialization from the host,
+- exposing operational capabilities through the module,
+- and supporting the backend validation flow required by the integration.
 
-# What was added
+## Scope
+- Add BioCatch SDK wrapper and integration entry points
+- Add configuration/bootstrap support
+- Add runtime support for operational SDK usage
+- Connect backend validation calls related to BioCatch
+- Update affected contracts and internal flow where needed
+- Add and update related unit tests
 
-- Initial BioCatch module structure
-- Separation of responsibilities between configuration and tracking flows
-- Public contracts for module consumption
-- Internal SDK integration layer
-- Main-thread-safe access for SDK interaction
-- Swift Package setup and target organization
-- Initial unit tests for module-owned behavior
+## Design notes
+The integration is implemented at module level rather than inside a feature-specific flow, since BioCatch responsibilities go beyond a single login use case.
 
-# Design goals
+The module keeps vendor-specific details isolated and provides a cleaner separation between:
+- configuration/bootstrap,
+- runtime execution,
+- and feature-level consumption.
 
-- Encapsulate the BioCatch SDK behind module-owned abstractions
-- Avoid direct vendor dependency usage from feature modules
-- Keep configuration concerns separate from runtime tracking concerns
-- Centralize SDK access through a controlled integration layer
-- Improve maintainability and future SDK replacement/upgrade flexibility
-- Provide a clean foundation for future extensions
+This helps prevent direct imports of the vendor SDK outside the module boundary.
 
-# Architecture notes
+## Testing
+- Added/updated unit tests for the BioCatch integration flow
+- Verified SDK setup and initialization path
+- Verified backend validation integration path
+- Verified affected contracts for the new flow
 
-The implementation follows a wrapper/facade approach:
+## Out of scope
+- Business rules for login, antifraud, or authorization
+- Environment selection logic inside the module
+- Exposing the vendor SDK as a public dependency
+- Broader feature-level adoption beyond the integration points included in this PR
 
-- **Public API** exposes only module-owned contracts
-- **Internal integration layer** adapts the vendor SDK
-- **Configuration** and **tracking** are separated by responsibility
-- SDK access is centralized to avoid duplication and vendor leakage
-- Unit tests focus on behavior owned by the module, using dependency injection and test doubles where applicable
-
-# Testing
-
-Included tests validate the behavior of the module-owned wrapper/adaptation layer.
-
-Note: vendor singleton wiring is intentionally not the focus of behavioral unit tests, since it represents infrastructure composition rather than deterministic module logic.
-
-# Why this matters
-
-This PR establishes the baseline architecture for BioCatch integration and provides a scalable entry point for future consumers, while keeping the SDK isolated from the rest of the codebase.
-
-# Follow-ups
-
-- Expand coverage for additional tracking scenarios
-- Add integration-level validation where needed
-- Refine public API ergonomics based on first consumers
-- Extend documentation/examples for consuming modules
+## Reviewer focus
+Please review mainly:
+- module boundary and encapsulation of vendor-specific concerns,
+- separation between configuration, runtime, and operational usage,
+- backend validation integration points,
+- and test coverage for the new flow.
